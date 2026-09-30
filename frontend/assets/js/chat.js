@@ -1,5 +1,12 @@
 var checkout = {};
 
+var lexSessionId = sessionStorage.getItem('lexSessionId');
+
+if (!lexSessionId) {
+  lexSessionId = 'session-' + Date.now() + '-' + Math.random().toString(36).substring(2);
+  sessionStorage.setItem('lexSessionId', lexSessionId);
+}
+
 $(document).ready(function() {
   var $messages = $('.messages-content'),
     d, h, m,
@@ -31,6 +38,7 @@ $(document).ready(function() {
       messages: [{
         type: 'unstructured',
         unstructured: {
+          id: lexSessionId,
           text: message
         }
       }]
