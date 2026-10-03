@@ -5,32 +5,67 @@ import urllib.request
 from urllib.error import HTTPError
 from botocore.auth import SigV4Auth
 from botocore.awsrequest import AWSRequest
-import os
 
 
-REGION = os.getenv("AWS_REGION", "us-east-1")
+REGION = "us-east-1"
 
-QUEUE_URL = os.environ["QUEUE_URL"]
-OPENSEARCH_ENDPOINT = os.environ["OPENSEARCH_ENDPOINT"]
+QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/453388807351/Q1"
 
-INDEX_NAME = os.getenv("OPENSEARCH_INDEX", "restaurants")
-TABLE_NAME = os.getenv("DYNAMODB_TABLE", "yelp-restaurants")
+# OpenSearch domain endpoint
+OPENSEARCH_ENDPOINT = (
+    "https://search-restaurants-dutb6ogkgn4tyn5npj5k2tgzke."
+    "us-east-1.es.amazonaws.com"
+)
+
+INDEX_NAME = "restaurants"
+TABLE_NAME = "yelp-restaurants"
+STATE_TABLE_NAME = "user-search-state"
 
 
-sqs = boto3.client("sqs", region_name=REGION)
-dynamodb = boto3.resource("dynamodb", region_name=REGION)
-table = dynamodb.Table(TABLE_NAME)
-ses = boto3.client("ses", region_name=REGION)
+# -------------------------------------
+# AWS clients/resources
+# -------------------------------------
 
-SENDER_EMAIL = os.environ["SENDER_EMAIL"]
+sqs = boto3.client(
+    "sqs",
+    region_name=REGION
+)
 
+dynamodb = boto3.resource(
+    "dynamodb",
+    region_name=REGION
+)
+
+restaurant_table = dynamodb.Table(
+    TABLE_NAME
+)
+
+state_table = dynamodb.Table(
+    STATE_TABLE_NAME
+)
+
+ses = boto3.client(
+    "ses",
+    region_name=REGION
+)
+
+SENDER_EMAIL = "ak12378@nyu.edu"
+
+
+# -------------------------------------
+# OpenSearch
+# -------------------------------------
 
 def search_restaurants(cuisine):
     """
-    Search OpenSearch for restaurants matching the requested cuisine.
+    Search OpenSearch for restaurants matching
+    the requested cuisine.
     """
 
-    url = f"{OPENSEARCH_ENDPOINT}/{INDEX_NAME}/_search"
+    url = (
+        f"{OPENSEARCH_ENDPOINT}/"
+        f"{INDEX_NAME}/_search"
+    )
 
     query = {
         "size": 20,
@@ -41,17 +76,23 @@ def search_restaurants(cuisine):
         }
     }
 
-    body = json.dumps(query).encode("utf-8")
+    body = json.dumps(
+        query
+    ).encode("utf-8")
 
     session = boto3.Session()
-    credentials = session.get_credentials()
+
+    credentials = (
+        session.get_credentials()
+    )
 
     request = AWSRequest(
         method="POST",
         url=url,
         data=body,
         headers={
-            "Content-Type": "application/json"
+            "Content-Type":
+                "application/json"
         }
     )
 
@@ -63,83 +104,234 @@ def search_restaurants(cuisine):
 
     prepared = request.prepare()
 
-    http_request = urllib.request.Request(
-        url,
-        data=body,
-        headers=dict(prepared.headers),
-        method="POST"
+    http_request = (
+        urllib.request.Request(
+            url,
+            data=body,
+            headers=dict(
+                prepared.headers
+            ),
+            method="POST"
+        )
     )
 
     try:
-        with urllib.request.urlopen(http_request) as response:
-            result = json.loads(response.read().decode("utf-8"))
+        with urllib.request.urlopen(
+            http_request
+        ) as response:
+
+            result = json.loads(
+                response.read().decode(
+                    "utf-8"
+                )
+            )
 
     except HTTPError as error:
+
         print("OpenSearch error:")
-        print(error.read().decode("utf-8"))
+        print(
+            error.read().decode(
+                "utf-8"
+            )
+        )
+
         raise
 
-    hits = result["hits"]["hits"]
+    hits = (
+        result["hits"]["hits"]
+    )
 
-    print(f"OpenSearch returned {len(hits)} restaurants")
+    print(
+        f"OpenSearch returned "
+        f"{len(hits)} restaurants"
+    )
 
     return hits
 
 
-def get_restaurant_details(restaurant_id):
+# -------------------------------------
+# Restaurant DynamoDB
+# -------------------------------------
+
+def get_restaurant_details(
+    restaurant_id
+):
     """
-    Retrieve complete restaurant information from DynamoDB.
+    Retrieve complete restaurant details
+    from DynamoDB.
     """
 
-    response = table.get_item(
-        Key={
-            "businessId": restaurant_id
-        }
+    response = (
+        restaurant_table.get_item(
+            Key={
+                "businessId":
+                    restaurant_id
+            }
+        )
     )
 
     return response.get("Item")
 
-def send_email(recipient, request_data, restaurants):
+
+# -------------------------------------
+# Extra-credit state functions
+# -------------------------------------
+
+def get_previous_restaurant_ids(
+    session_id
+):
     """
-    Send restaurant recommendations using Amazon SES.
+    Retrieve the restaurant IDs sent during
+    the user's previous recommendation.
     """
 
-    location = request_data["location"].title()
-    cuisine = request_data["cuisine"].title()
-    dining_time = request_data["diningTime"]
-    number_of_people = request_data["numberOfPeople"]
+    response = state_table.get_item(
+        Key={
+            "sessionId": session_id
+        }
+    )
 
-    subject = f"Your {cuisine} Restaurant Suggestions"
+    item = response.get("Item")
+
+    if not item:
+        return []
+
+    return item.get(
+        "restaurantIds",
+        []
+    )
+
+
+def save_restaurant_ids(
+    session_id,
+    restaurant_ids
+):
+    """
+    Store the restaurant IDs that were
+    successfully emailed to the user.
+    """
+
+    state_table.update_item(
+        Key={
+            "sessionId": session_id
+        },
+        UpdateExpression=(
+            "SET restaurantIds = :ids"
+        ),
+        ExpressionAttributeValues={
+            ":ids": restaurant_ids
+        }
+    )
+
+    print(
+        "Previous restaurant "
+        "recommendations saved."
+    )
+
+
+# -------------------------------------
+# SES
+# -------------------------------------
+
+def send_email(
+    recipient,
+    request_data,
+    restaurants
+):
+    """
+    Send restaurant recommendations
+    using Amazon SES.
+    """
+
+    location = (
+        request_data["location"]
+        .title()
+    )
+
+    cuisine = (
+        request_data["cuisine"]
+        .title()
+    )
+
+    dining_time = (
+        request_data["diningTime"]
+    )
+
+    number_of_people = (
+        request_data["numberOfPeople"]
+    )
+
+    subject = (
+        f"Your {cuisine} "
+        f"Restaurant Suggestions"
+    )
 
     lines = [
         "Hello!",
         "",
-        f"Here are your restaurant suggestions for {cuisine} food in {location},",
-        f"for {number_of_people} people at {dining_time}.",
+        (
+            f"Here are your restaurant "
+            f"suggestions for {cuisine} "
+            f"food in {location},"
+        ),
+        (
+            f"for {number_of_people} "
+            f"people at {dining_time}."
+        ),
         ""
     ]
 
-    for i, restaurant in enumerate(restaurants, start=1):
-        lines.append(f"{i}. {restaurant.get('name', 'Unknown')}")
-        lines.append(f"   Address: {restaurant.get('address', 'N/A')}")
-        lines.append(f"   Rating: {restaurant.get('rating', 'N/A')}")
-        lines.append(f"   Reviews: {restaurant.get('reviewCount', 'N/A')}")
+    for i, restaurant in enumerate(
+        restaurants,
+        start=1
+    ):
+
+        lines.append(
+            f"{i}. "
+            f"{restaurant.get('name', 'Unknown')}"
+        )
+
+        lines.append(
+            "   Address: "
+            f"{restaurant.get('address', 'N/A')}"
+        )
+
+        lines.append(
+            "   Rating: "
+            f"{restaurant.get('rating', 'N/A')}"
+        )
+
+        lines.append(
+            "   Reviews: "
+            f"{restaurant.get('reviewCount', 'N/A')}"
+        )
+
         lines.append("")
 
-    lines.append("Enjoy your meal!")
-    lines.append("Dining Concierge")
+    lines.append(
+        "Enjoy your meal!"
+    )
+
+    lines.append(
+        "Dining Concierge"
+    )
 
     body = "\n".join(lines)
 
     response = ses.send_email(
         Source=SENDER_EMAIL,
+
         Destination={
-            "ToAddresses": [recipient]
+            "ToAddresses": [
+                recipient
+            ]
         },
+
         Message={
             "Subject": {
                 "Data": subject
             },
+
             "Body": {
                 "Text": {
                     "Data": body
@@ -148,18 +340,28 @@ def send_email(recipient, request_data, restaurants):
         }
     )
 
-    print(f"SES MessageId: {response['MessageId']}")
+    print(
+        "SES MessageId:",
+        response["MessageId"]
+    )
 
     return response
 
 
-def lambda_handler(event, context):
+# -------------------------------------
+# Lambda handler
+# -------------------------------------
+
+def lambda_handler(
+    event,
+    context
+):
 
     print("LF2 invoked")
 
-    # -----------------------------
-    # 1. Read one request from Q1
-    # -----------------------------
+    # ---------------------------------
+    # 1. Read one message from Q1
+    # ---------------------------------
 
     response = sqs.receive_message(
         QueueUrl=QUEUE_URL,
@@ -167,89 +369,294 @@ def lambda_handler(event, context):
         WaitTimeSeconds=0
     )
 
-    messages = response.get("Messages", [])
+    messages = response.get(
+        "Messages",
+        []
+    )
 
     if not messages:
-        print("No messages available in Q1")
+
+        print(
+            "No messages available "
+            "in Q1"
+        )
 
         return {
             "statusCode": 200,
-            "body": "No messages available"
+            "body":
+                "No messages available"
         }
 
     message = messages[0]
 
-    print("SQS message body:")
-    print(message["Body"])
-
-    request_data = json.loads(message["Body"])
-
-    cuisine = request_data["cuisine"].title()
-    location = request_data["location"]
-    dining_time = request_data["diningTime"]
-    number_of_people = request_data["numberOfPeople"]
-    email = request_data["email"]
-
-    print(f"Cuisine requested: {cuisine}")
-    print(f"Location: {location}")
-    print(f"Dining time: {dining_time}")
-    print(f"Number of people: {number_of_people}")
-
-    # -----------------------------
-    # 2. Search OpenSearch
-    # -----------------------------
-
-    hits = search_restaurants(cuisine)
-
-    if not hits:
-        print("No matching restaurants found.")
-
-        return {
-            "statusCode": 404,
-            "body": "No restaurants found"
-        }
-
-    # -----------------------------
-    # 3. Randomly select restaurants
-    # -----------------------------
-
-    selected_hits = random.sample(
-        hits,
-        min(3, len(hits))
+    print(
+        "SQS message body:"
     )
 
-    # -----------------------------
-    # 4. Retrieve details from DynamoDB
-    # -----------------------------
+    print(
+        message["Body"]
+    )
+
+    request_data = json.loads(
+        message["Body"]
+    )
+
+    cuisine = (
+        request_data["cuisine"]
+        .title()
+    )
+
+    location = (
+        request_data["location"]
+    )
+
+    dining_time = (
+        request_data["diningTime"]
+    )
+
+    number_of_people = (
+        request_data[
+            "numberOfPeople"
+        ]
+    )
+
+    email = (
+        request_data["email"]
+    )
+
+    session_id = (
+        request_data.get(
+            "sessionId"
+        )
+    )
+
+    reuse_previous = (
+        request_data.get(
+            "reusePrevious",
+            False
+        )
+    )
+
+    print(
+        f"Cuisine requested: "
+        f"{cuisine}"
+    )
+
+    print(
+        f"Location: {location}"
+    )
+
+    print(
+        f"Dining time: "
+        f"{dining_time}"
+    )
+
+    print(
+        f"Number of people: "
+        f"{number_of_people}"
+    )
+
+    print(
+        f"Reuse previous: "
+        f"{reuse_previous}"
+    )
 
     restaurants = []
+    restaurant_ids = []
 
-    for hit in selected_hits:
+    # ---------------------------------
+    # 2. Reuse previous restaurants
+    # ---------------------------------
 
-        restaurant_id = hit["_source"]["RestaurantID"]
+    if (
+        reuse_previous
+        and session_id
+    ):
 
-        print(f"Looking up RestaurantID: {restaurant_id}")
+        print(
+            "User requested previous "
+            "restaurant recommendations."
+        )
 
-        restaurant = get_restaurant_details(restaurant_id)
+        previous_ids = (
+            get_previous_restaurant_ids(
+                session_id
+            )
+        )
 
-        if restaurant:
-            restaurants.append(restaurant)
+        if previous_ids:
 
-    print("\nRestaurant recommendations:")
+            print(
+                f"Found "
+                f"{len(previous_ids)} "
+                f"previous restaurant IDs."
+            )
 
-    for restaurant in restaurants:
-        print("-------------------------")
-        print("Name:", restaurant.get("name"))
-        print("Address:", restaurant.get("address"))
-        print("Rating:", restaurant.get("rating"))
-        print("Reviews:", restaurant.get("reviewCount"))
-    
+            for restaurant_id in (
+                previous_ids
+            ):
+
+                restaurant = (
+                    get_restaurant_details(
+                        restaurant_id
+                    )
+                )
+
+                if restaurant:
+
+                    restaurants.append(
+                        restaurant
+                    )
+
+                    restaurant_ids.append(
+                        restaurant_id
+                    )
+
+        else:
+
+            print(
+                "No previous restaurant "
+                "IDs found. Generating "
+                "new recommendations."
+            )
+
+    # ---------------------------------
+    # 3. Generate new recommendations
+    # ---------------------------------
+
     if not restaurants:
-        print("No restaurant details were retrieved.")
+
+        print(
+            "Generating new restaurant "
+            "recommendations."
+        )
+
+        hits = search_restaurants(
+            cuisine
+        )
+
+        if not hits:
+
+            print(
+                "No matching "
+                "restaurants found."
+            )
+
+            return {
+                "statusCode": 404,
+                "body":
+                    "No restaurants found"
+            }
+
+        selected_hits = (
+            random.sample(
+                hits,
+                min(
+                    3,
+                    len(hits)
+                )
+            )
+        )
+
+        # -----------------------------
+        # Retrieve full restaurant
+        # details from DynamoDB
+        # -----------------------------
+
+        for hit in selected_hits:
+
+            restaurant_id = (
+                hit["_source"]
+                ["RestaurantID"]
+            )
+
+            print(
+                "Looking up "
+                f"RestaurantID: "
+                f"{restaurant_id}"
+            )
+
+            restaurant = (
+                get_restaurant_details(
+                    restaurant_id
+                )
+            )
+
+            if restaurant:
+
+                restaurants.append(
+                    restaurant
+                )
+
+                restaurant_ids.append(
+                    restaurant_id
+                )
+
+    # ---------------------------------
+    # 4. Validate recommendations
+    # ---------------------------------
+
+    if not restaurants:
+
+        print(
+            "No restaurant details "
+            "were retrieved."
+        )
+
         return {
             "statusCode": 404,
-            "body": "No restaurant details found"
+            "body":
+                "No restaurant "
+                "details found"
         }
+
+    print(
+        "\nRestaurant "
+        "recommendations:"
+    )
+
+    for restaurant in restaurants:
+
+        print(
+            "-------------------------"
+        )
+
+        print(
+            "Name:",
+            restaurant.get(
+                "name"
+            )
+        )
+
+        print(
+            "Address:",
+            restaurant.get(
+                "address"
+            )
+        )
+
+        print(
+            "Rating:",
+            restaurant.get(
+                "rating"
+            )
+        )
+
+        print(
+            "Reviews:",
+            restaurant.get(
+                "reviewCount"
+            )
+        )
+
+    # ---------------------------------
+    # 5. Send recommendation email
+    # ---------------------------------
+
+    print(
+        "\nSending restaurant "
+        "recommendations..."
+    )
 
     send_email(
         recipient=email,
@@ -257,17 +664,50 @@ def lambda_handler(event, context):
         restaurants=restaurants
     )
 
-    print("Email sent successfully!")
-
-    # Delete the SQS message only after the email was sent successfully
-    sqs.delete_message(
-        QueueUrl=QUEUE_URL,
-        ReceiptHandle=message["ReceiptHandle"]
+    print(
+        "Email sent successfully!"
     )
 
-    print("SQS message deleted successfully!")
+    # ---------------------------------
+    # 6. Save restaurants as the
+    #    latest recommendation
+    # ---------------------------------
+
+    if (
+        session_id
+        and restaurant_ids
+    ):
+
+        save_restaurant_ids(
+            session_id,
+            restaurant_ids
+        )
+
+    # ---------------------------------
+    # 7. Delete SQS message only after
+    #    successful processing
+    # ---------------------------------
+
+    sqs.delete_message(
+        QueueUrl=QUEUE_URL,
+        ReceiptHandle=(
+            message[
+                "ReceiptHandle"
+            ]
+        )
+    )
+
+    print(
+        "SQS message deleted "
+        "successfully!"
+    )
 
     return {
         "statusCode": 200,
-        "body": f"Sent {len(restaurants)} restaurant recommendations to {email}"
+        "body": (
+            f"Sent "
+            f"{len(restaurants)} "
+            "restaurant "
+            "recommendations"
+        )
     }
