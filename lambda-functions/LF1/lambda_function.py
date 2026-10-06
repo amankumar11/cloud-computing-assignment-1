@@ -72,6 +72,47 @@ def handle_dining_suggestions(event):
                 }
             ]
         }
+    
+    # ---------------------------
+    # Validate cuisine
+    # ---------------------------
+
+    allowed_cuisines = {
+        "chinese",
+        "indian",
+        "italian",
+        "japanese",
+        "mexican"
+    }
+
+    cuisine = get_slot_value(slots, "Cuisine")
+
+    if cuisine and cuisine.lower() not in allowed_cuisines:
+
+        slots["Cuisine"] = None
+
+        return {
+            "sessionState": {
+                "dialogAction": {
+                    "type": "ElicitSlot",
+                    "slotToElicit": "Cuisine"
+                },
+                "intent": {
+                    "name": "DiningSuggestionsIntent",
+                    "slots": slots,
+                    "state": "InProgress"
+                }
+            },
+            "messages": [
+                {
+                    "contentType": "PlainText",
+                    "content":
+                        "Sorry, I currently support Chinese, Indian, "
+                        "Italian, Japanese, and Mexican cuisine. "
+                        "Please choose one of these options."
+                }
+            ]
+        }
 
     # ---------------------------
     # Check whether normal slots exist
